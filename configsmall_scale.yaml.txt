@@ -1,0 +1,47 @@
+# Configuration for Quick Testing & Debugging
+# Use for development before full-scale evaluation
+
+network:
+  edge_nodes: 10            # Small scale for fast testing
+  cloud_nodes: 2
+  
+  link_latency_edge: [1, 3]
+  link_latency_cloud: [8, 20]
+  link_latency_backbone: [3, 10]
+  bandwidth_gbps: [1, 5]
+  
+  node_security:
+    edge: {none: 0.3, basic: 0.5, advanced: 0.2}
+    cloud: {basic: 0.2, advanced: 0.8}
+
+traffic:
+  arrival_rate: 10          # Lower rate for quick runs
+  chain_lengths: [2, 3, 4]  # Shorter chains
+  latency_bounds: [15, 30, 60]
+  security_policies:
+    low: 0.4
+    medium: 0.4
+    high: 0.2
+  throughput_range: [0.1, 5.0]
+
+algorithm:
+  alpha: 0.7
+  beta: 0.8
+  max_candidates: 10
+  milp_time_limit: 60       # Shorter timeout for testing
+
+evaluation:
+  num_requests: 100         # Small number for quick feedback
+  warmup_requests: 20
+  num_runs: 5               # Fewer runs for testing
+  confidence_level: 0.95
+  save_raw_results: true
+  random_seed: 42           # Fixed seed for reproducibility in testing
+
+output:
+  raw_results_dir: results/raw/
+  figures_dir: results/figures/
+  log_file: results/test.log
+  print_summary: true
+  export_csv: false
+  export_json: true

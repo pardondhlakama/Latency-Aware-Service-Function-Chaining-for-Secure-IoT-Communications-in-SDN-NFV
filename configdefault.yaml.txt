@@ -1,0 +1,84 @@
+# Configuration for Full-Scale Evaluation (Manuscript Results)
+# Aligns with Section IV.B of manuscript
+
+network:
+  # Topology parameters
+  edge_nodes: 100           # Number of edge micro-data centers
+  cloud_nodes: 5            # Number of cloud data centers
+  
+  # Link latency distributions (uniform range in ms)
+  link_latency_edge: [1, 5]     # Edge-to-edge links
+  link_latency_cloud: [10, 30]  # Edge-to-cloud links
+  link_latency_backbone: [5, 15] # Cloud-to-cloud backbone
+  
+  # Link bandwidth (Gbps, uniform range)
+  bandwidth_gbps: [1, 10]
+  
+  # Security capability distribution for nodes
+  node_security:
+    edge: {none: 0.2, basic: 0.5, advanced: 0.3}
+    cloud: {basic: 0.1, advanced: 0.9}
+
+traffic:
+  # Request arrival process
+  arrival_rate: 50          # SFC requests per second (Poisson)
+  
+  # SFC chain characteristics
+  chain_lengths: [3, 5, 7]  # Possible number of VNFs per chain
+  vnf_library:              # Available VNF types
+    - firewall
+    - ids
+    - encryptor
+    - transcoder
+    - loadbalancer
+    - nat
+    - wan_optimizer
+  
+  # Application classes with latency requirements
+  latency_bounds: [10, 25, 50]  # ms (ultra-low, low, moderate)
+  
+  # Security policy distribution
+  security_policies:
+    low: 0.3      # Basic authentication only
+    medium: 0.5   # Encryption + integrity
+    high: 0.2     # Advanced: mutual auth, encryption, auditing
+  
+  # Throughput requirements (Mbps)
+  throughput_range: [0.1, 10.0]
+
+algorithm:
+  # Proposed method hyperparameters
+  alpha: 0.7        # Weight: latency vs. security in objective (Eq. 1)
+  beta: 0.8         # Weight: latency vs. security in routing (Eq. 3)
+  
+  # Heuristic parameters
+  max_candidates: 20    # Max nodes to consider per VNF placement
+  resource_threshold: 0.1  # Min available resource ratio to consider node
+  
+  # MILP baseline parameters
+  milp_time_limit: 300    # Seconds per request (for exact solver)
+
+evaluation:
+  # Simulation scale
+  num_requests: 1000      # Total SFC requests to process
+  warmup_requests: 100    # Requests to skip for steady-state
+  
+  # Statistical robustness
+  num_runs: 30            # Independent simulation runs
+  confidence_level: 0.95  # For confidence intervals
+  
+  # Output settings
+  save_raw_results: true
+  save_placement_details: false  # Set true for debugging
+  random_seed: null      # null = different seed per run
+
+output:
+  # Result file paths
+  raw_results_dir: results/raw/
+  figures_dir: results/figures/
+  log_file: results/simulation.log
+  
+  # Reporting
+  print_summary: true
+  export_csv: true
+  export_json: true
