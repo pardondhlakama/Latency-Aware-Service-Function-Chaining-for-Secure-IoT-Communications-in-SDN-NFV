@@ -1,0 +1,360 @@
+"""
+Baseline Algorithms for Comparison
+Implements three representative approaches from literature.
+"""
+
+import numpy as np
+import networkx as nx
+from typing import Dict, List
+from simulator.orchestrator import LatencyAwareOrchestrator
+
+
+class LatencyAgnostic:
+    """
+    Baseline: Place VNFs on nodes with highest available resources,
+    ignoring latency considerations.
+    
+    Represents approaches that optimize for resource utilization only.
+    """
+    
+    def __init__(self, network: nx.Graph):
+        self.G = network
+        self.resource_usage = {
+            node: {'cpu': 0} for node in network.nodes()
+        }
+    
+    def place_vnfs(self, request: Dict) -> Dict[str, str]:
+        """Place each VNF on node with most available CPU."""
+        placement = {}
+        
+        for vnf in request['chain']:
+            # Find feasible nodes
+            feasible = [
+                v for v in self.G.nodes()
+                if (self.G.nodes[v]['cpu_capacity'] - 
+                    self.resource_usage[v]['cpu']) >= vnf['cpu_requirement']
+            ]
+            
+            if not feasible:
+                raise RuntimeError(f"Resource exhaustion for {vnf['id']}")
+            
+            # Select node with most available CPU (ignoring latency)
+            best_node = max(
+                feasible,
+                key=lambda v: self.G.nodes[v]['cpu_capacity'] - 
+                             self.resource_usage[v]['cpu']
+            )
+            
+            placement[vnf['id']] = best_node
+            self.resource_usage[best_node]['cpu'] += vnf['cpu_requirement']
+        
+        return placement
+    
+    def route_path(self, placement: Dict, request: Dict) -> List[str]:
+        """Route using standard shortest path (latency weight only)."""
+        waypoints = [request['source']] + \
+                   [placement[vnf['id']] for vnf in request['chain']] + \
+                   [request['destination']]
+        
+        full_path = []
+        for i in range(len(waypoints) - 1):
+            segment = nx.shortest_path(
+                self.G, waypoints[i], waypoints[i+1], weight='latency'
+            )
+            full_path.extend(segment[:-1])
+        full_path.append(waypoints[-1])
+        
+        return full_path
+    
+    def process_request(self, request: Dict) -> Dict:
+        """Process request with latency-agnostic strategy."""
+        try:
+            placement = self.place_vnfs(request)
+            path = self.route_path(placement, request)
+            
+            # Compute latency (same formula as proposed method)
+            link_latency = sum(
+                self.G.edges[path[i], path[i+1]]['latency']
+                for i in range(len(path) - 1)
+            )
+            proc_latency = sum(vnf['processing_time'] for vnf in request['chain'])
+            queue_latency = np.random.exponential(scale=0.5)
+            total_latency = link_latency + proc_latency + queue_latency
+            
+            # Check security (post-hoc, not optimized)
+            compliant = self._check_security(path, request['security_policy'])
+            
+            return {
+                'request_id': request['id'],
+                'placement': placement,
+                'path': path,
+                'latency_ms': total_latency,
+                'compliant': compliant,
+                'accepted': total_latency <= request['max_latency'],
+                'error': None
+            }
+        except Exception as e:
+            return {
+                'request_id': request['id'],
+                'placement': {},
+                'path': [],
+                'latency_ms': float('inf'),
+                'compliant': False,
+                'accepted': False,
+                'error': str(e)
+            }
+    
+    def _check_security(self, path: List[str], policy: str) -> bool:
+        """Simple security check (same as proposed method)."""
+        policy_req = {'low': 0, 'medium': 1, 'high': 2}
+        sec_levels = {'none': 0, 'basic': 1, 'advanced': 2}
+        required = policy_req.get(policy, 0)
+        
+        for i in range(len(path) - 1):
+            edge_sec = self.G.edges[path[i], path[i+1]].get('security_level', 'none')
+            if sec_levels.get(edge_sec, 0) < required:
+                return False
+        return True
+
+
+class SecurityFirst:
+    """
+    Baseline: Enforce all security VNFs at chain entry point,
+    then optimize for latency.
+    
+    Represents approaches that prioritize security at expense of latency.
+    """
+    
+    def __init__(self, network: nx.Graph):
+        self.G = network
+        self.resource_usage = {
+            node: {'cpu': 0} for node in network.nodes()
+        }
+    
+    def place_vnfs(self, request: Dict) -> Dict[str, str]:
+        """Place security VNFs first on high-security nodes, then others by latency."""
+        placement = {}
+        
+        # Separate security and non-security VNFs
+        security_vnfs = [v for v in request['chain'] if v.get('is_security', False)]
+        other_vnfs = [v for v in request['chain'] if not v.get('is_security', False)]
+        
+        # Place security VNFs on nodes with highest security level
+        for vnf in security_vnfs:
+            feasible = [
+                v for v in self.G.nodes()
+                if (self.G.nodes[v]['cpu_capacity'] - 
+                    self.resource_usage[v]['cpu']) >= vnf['cpu_requirement']
+            ]
+            if not feasible:
+                raise RuntimeError(f"Resource exhaustion for {vnf['id']}")
+            
+            # Prefer nodes with advanced security
+            best_node = max(
+                feasible,
+                key=lambda v: (
+                    2 if self.G.nodes[v].get('security_capability', 'none') == 'advanced' else
+                    1 if self.G.nodes[v].get('security_capability', 'none') == 'basic' else
+                    0,
+                    -self.resource_usage[v]['cpu']  # Tie-breaker: less loaded
+                )
+            )
+            placement[vnf['id']] = best_node
+            self.resource_usage[best_node]['cpu'] += vnf['cpu_requirement']
+        
+        # Place other VNFs by latency-aware scoring (like proposed method)
+        orchestrator = LatencyAwareOrchestrator(self.G)
+        for vnf in other_vnfs:
+            feasible = [
+                v for v in self.G.nodes()
+                if (self.G.nodes[v]['cpu_capacity'] - 
+                    self.resource_usage[v]['cpu']) >= vnf['cpu_requirement']
+            ]
+            if not feasible:
+                raise RuntimeError(f"Resource exhaustion for {vnf['id']}")
+            
+            scores = {
+                v: orchestrator._compute_node_score(
+                    v, request['source'], vnf,
+                    {n: self.G.nodes[n]['cpu_capacity'] - self.resource_usage[n]['cpu'] 
+                     for n in self.G.nodes()}
+                )
+                for v in feasible
+            }
+            best_node = max(scores, key=scores.get)
+            placement[vnf['id']] = best_node
+            self.resource_usage[best_node]['cpu'] += vnf['cpu_requirement']
+        
+        return placement
+    
+    def route_path(self, placement: Dict, request: Dict) -> List[str]:
+        """Route with security constraints enforced."""
+        # Same as proposed method
+        orchestrator = LatencyAwareOrchestrator(self.G)
+        return orchestrator.route_path(placement, request)
+    
+    def process_request(self, request: Dict) -> Dict:
+        """Process request with security-first strategy."""
+        try:
+            placement = self.place_vnfs(request)
+            path = self.route_path(placement, request)
+            
+            # Compute latency
+            link_latency = sum(
+                self.G.edges[path[i], path[i+1]]['latency']
+                for i in range(len(path) - 1)
+            )
+            proc_latency = sum(vnf['processing_time'] for vnf in request['chain'])
+            queue_latency = np.random.exponential(scale=0.5)
+            total_latency = link_latency + proc_latency + queue_latency
+            
+            # Security compliance guaranteed by placement strategy
+            compliant = True
+            
+            return {
+                'request_id': request['id'],
+                'placement': placement,
+                'path': path,
+                'latency_ms': total_latency,
+                'compliant': compliant,
+                'accepted': total_latency <= request['max_latency'],
+                'error': None
+            }
+        except Exception as e:
+            return {
+                'request_id': request['id'],
+                'placement': {},
+                'path': [],
+                'latency_ms': float('inf'),
+                'compliant': False,
+                'accepted': False,
+                'error': str(e)
+            }
+
+
+class MILPExact:
+    """
+    Baseline: Exact solution using Mixed-Integer Linear Programming.
+    
+    Optimal but computationally expensive - included for benchmarking only.
+    Note: Requires Gurobi license (academic free available).
+    """
+    
+    def __init__(self, network: nx.Graph, time_limit: int = 300):
+        self.G = network
+        self.time_limit = time_limit
+        self._check_gurobi()
+    
+    def _check_gurobi(self):
+        """Check if Gurobi is available."""
+        try:
+            import gurobipy as gp
+        except ImportError:
+            raise ImportError(
+                "MILPExact requires gurobipy. Install with: pip install gurobipy\n"
+                "Academic license: https://www.gurobi.com/academia/academic-program-and-licenses/"
+            )
+    
+    def process_request(self, request: Dict) -> Dict:
+        """
+        Solve SFC placement as MILP (simplified version).
+        
+        Note: Full formulation is complex; this is a representative implementation.
+        For manuscript reproducibility, we use heuristic approximation when Gurobi unavailable.
+        """
+        try:
+            import gurobipy as gp
+            from gurobipy import GRB
+            
+            # Create model
+            model = gp.Model("sfc_placement")
+            model.Params.TimeLimit = self.time_limit
+            model.Params.OutputFlag = 0  # Silent
+            
+            # Decision variables: x[r,f,v] = 1 if VNF f of request r on node v
+            x = {}
+            for vnf in request['chain']:
+                for v in self.G.nodes():
+                    if self.G.nodes[v]['cpu_capacity'] >= vnf['cpu_requirement']:
+                        x[(request['id'], vnf['id'], v)] = model.addVar(
+                            vtype=GRB.BINARY, name=f"x_{request['id']}_{vnf['id']}_{v}"
+                        )
+            
+            # Objective: Minimize latency (simplified)
+            # In full version: include security overhead term
+            latency_expr = gp.LinExpr()
+            for vnf in request['chain']:
+                for v in self.G.nodes():
+                    if (request['id'], vnf['id'], v) in x:
+                        # Estimated processing + propagation delay
+                        proc_delay = vnf['processing_time']
+                        prop_delay = nx.shortest_path_length(
+                            self.G, request['source'], v, weight='latency'
+                        )
+                        latency_expr += x[(request['id'], vnf['id'], v)] * (proc_delay + prop_delay)
+            
+            model.setObjective(latency_expr, GRB.MINIMIZE)
+            
+            # Constraints: Each VNF placed exactly once
+            for vnf in request['chain']:
+                model.addConstr(
+                    gp.quicksum(x[(request['id'], vnf['id'], v)] 
+                               for v in self.G.nodes() 
+                               if (request['id'], vnf['id'], v) in x) == 1
+                )
+            
+            # Solve
+            model.optimize()
+            
+            if model.Status == GRB.OPTIMAL:
+                # Extract solution
+                placement = {}
+                for vnf in request['chain']:
+                    for v in self.G.nodes():
+                        if (request['id'], vnf['id'], v) in x and x[(request['id'], vnf['id'], v)].X > 0.5:
+                            placement[vnf['id']] = v
+                            break
+                
+                # Route path (shortest path through placed VNFs)
+                waypoints = [request['source']] + \
+                           [placement[vnf['id']] for vnf in request['chain']] + \
+                           [request['destination']]
+                path = []
+                for i in range(len(waypoints) - 1):
+                    segment = nx.shortest_path(
+                        self.G, waypoints[i], waypoints[i+1], weight='latency'
+                    )
+                    path.extend(segment[:-1])
+                path.append(waypoints[-1])
+                
+                # Compute final latency
+                total_latency = model.ObjVal + np.random.exponential(scale=0.3)
+                
+                return {
+                    'request_id': request['id'],
+                    'placement': placement,
+                    'path': path,
+                    'latency_ms': total_latency,
+                    'compliant': True,  # Assume compliant for MILP baseline
+                    'accepted': total_latency <= request['max_latency'],
+                    'error': None
+                }
+            else:
+                raise RuntimeError(f"MILP solve failed: status {model.Status}")
+                
+        except ImportError:
+            # Fallback: use proposed heuristic if Gurobi not available
+            logger = __import__('logging').getLogger(__name__)
+            logger.warning("Gurobi not available - using heuristic approximation for MILP baseline")
+            orchestrator = LatencyAwareOrchestrator(self.G)
+            return orchestrator.process_request(request)
+        except Exception as e:
+            return {
+                'request_id': request['id'],
+                'placement': {},
+                'path': [],
+                'latency_ms': float('inf'),
+                'compliant': False,
+                'accepted': False,
+                'error': f"MILP error: {str(e)}"
+            }

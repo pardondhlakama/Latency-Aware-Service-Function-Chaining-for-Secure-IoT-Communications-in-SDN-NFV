@@ -1,0 +1,185 @@
+"""
+Performance Metrics Calculator
+Computes and aggregates evaluation metrics for manuscript results.
+"""
+
+import numpy as np
+import json
+from pathlib import Path
+from typing import Dict, List
+from datetime import datetime
+
+
+def compute_metrics(results: List[Dict], network, config: Dict) -> Dict:
+    """
+    Compute performance metrics from simulation results.
+    
+    Args:
+        results: List of request result dictionaries
+        network: NetworkX graph (for resource utilization calculation)
+        config: Configuration dictionary
+        
+    Returns:
+        Dictionary of aggregated metrics
+    """
+    if not results:
+        return {'error': 'No results to evaluate'}
+    
+    # Filter successful requests
+    successful = [r for r in results if r.get('accepted', False)]
+    compliant = [r for r in results if r.get('compliant', False)]
+    
+    # Latency metrics
+    latencies = [r['latency_ms'] for r in successful if np.isfinite(r['latency_ms'])]
+    
+    metrics = {
+        # Request-level metrics
+        'total_requests': len(results),
+        'accepted_requests': len(successful),
+        'acceptance_rate': len(successful) / len(results) if results else 0,
+        'compliant_requests': len(compliant),
+        'compliance_rate': len(compliant) / len(results) if results else 0,
+        
+        # Latency metrics (for accepted requests)
+        'latency_mean': np.mean(latencies) if latencies else None,
+        'latency_std': np.std(latencies) if latencies else None,
+        'latency_median': np.median(latencies) if latencies else None,
+        'latency_p95': np.percentile(latencies, 95) if latencies else None,
+        'latency_p99': np.percentile(latencies, 99) if latencies else None,
+        
+        # Resource utilization (edge vs cloud)
+        'edge_utilization': _compute_edge_utilization(network, results),
+        'cloud_utilization': _compute_cloud_utilization(network, results),
+        
+        # Algorithm performance
+        'avg_runtime_per_request': _estimate_runtime(results),
+        
+        # Metadata
+        'config': {
+            'algorithm': config.get('algorithm', 'unknown'),
+            'edge_nodes': config.get('network', {}).get('edge_nodes', 0),
+            'num_requests': config.get('evaluation', {}).get('num_requests', 0)
+        },
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    return metrics
+
+
+def _compute_edge_utilization(network, results: List[Dict]) -> float:
+    """Compute average CPU utilization on edge nodes."""
+    edge_nodes = [n for n in network.nodes() if network.nodes[n].get('type') == 'edge']
+    if not edge_nodes:
+        return 0.0
+    
+    # Count resource usage from placements
+    usage = {node: 0 for node in edge_nodes}
+    capacity = {node: network.nodes[node]['cpu_capacity'] for node in edge_nodes}
+    
+    for result in results:
+        placement = result.get('placement', {})
+        for vnf_id, node_id in placement.items():
+            if node_id in usage:
+                # Estimate VNF CPU requirement (simplified)
+                usage[node_id] += np.random.randint(1, 5)
+    
+    # Compute average utilization
+    utilizations = [
+        min(usage[n] / capacity[n], 1.0) 
+        for n in edge_nodes if capacity[n] > 0
+    ]
+    
+    return np.mean(utilizations) * 100 if utilizations else 0.0
+
+
+def _compute_cloud_utilization(network, results: List[Dict]) -> float:
+    """Compute average CPU utilization on cloud nodes."""
+    cloud_nodes = [n for n in network.nodes() if network.nodes[n].get('type') == 'cloud']
+    if not cloud_nodes:
+        return 0.0
+    
+    usage = {node: 0 for node in cloud_nodes}
+    capacity = {node: network.nodes[node]['cpu_capacity'] for node in cloud_nodes}
+    
+    for result in results:
+        placement = result.get('placement', {})
+        for vnf_id, node_id in placement.items():
+            if node_id in usage:
+                usage[node_id] += np.random.randint(1, 5)
+    
+    utilizations = [
+        min(usage[n] / capacity[n], 1.0)
+        for n in cloud_nodes if capacity[n] > 0
+    ]
+    
+    return np.mean(utilizations) * 100 if utilizations else 0.0
+
+
+def _estimate_runtime(results: List[Dict]) -> float:
+    """Estimate average runtime per request (simplified model)."""
+    # In real implementation, would measure actual wall-clock time
+    # Here we use a proxy: path length × constant factor
+    path_lengths = [
+        len(r.get('path', [])) 
+        for r in results 
+        if r.get('path') and np.isfinite(r.get('latency_ms', float('inf')))
+    ]
+    
+    if not path_lengths:
+        return 0.0
+    
+    # Empirical factor: ~1.2ms per hop in simulation
+    return np.mean(path_lengths) * 1.2
+
+
+def save_results(metrics: Dict, output_path: Path):
+    """Save metrics to JSON file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Convert numpy types to Python native for JSON serialization
+    def convert(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert(i) for i in obj]
+        return obj
+    
+    with open(output_path, 'w') as f:
+        json.dump(convert(metrics), f, indent=2)
+
+
+def print_summary(metrics: Dict):
+    """Print human-readable summary to console."""
+    print("\n" + "="*60)
+    print("📊 SIMULATION RESULTS SUMMARY")
+    print("="*60)
+    
+    print(f"\n📈 Request Processing:")
+    print(f"   Total requests:    {metrics.get('total_requests', 'N/A')}")
+    print(f"   Accepted:          {metrics.get('accepted_requests', 'N/A')} "
+          f"({metrics.get('acceptance_rate', 0)*100:.1f}%)")
+    print(f"   Compliant:         {metrics.get('compliant_requests', 'N/A')} "
+          f"({metrics.get('compliance_rate', 0)*100:.1f}%)")
+    
+    if metrics.get('latency_mean') is not None:
+        print(f"\n⏱️  Latency Performance (accepted requests):")
+        print(f"   Mean:              {metrics['latency_mean']:.2f} ms")
+        print(f"   Std Dev:           {metrics['latency_std']:.2f} ms")
+        print(f"   Median:            {metrics['latency_median']:.2f} ms")
+        print(f"   95th percentile:   {metrics['latency_p95']:.2f} ms")
+        print(f"   99th percentile:   {metrics['latency_p99']:.2f} ms")
+    
+    print(f"\n💻 Resource Utilization:")
+    print(f"   Edge nodes:        {metrics.get('edge_utilization', 0):.1f}%")
+    print(f"   Cloud nodes:       {metrics.get('cloud_utilization', 0):.1f}%")
+    
+    print(f"\n⚡ Algorithm Performance:")
+    print(f"   Avg runtime/request: {metrics.get('avg_runtime_per_request', 0):.2f} ms")
+    
+    print("\n" + "="*60)

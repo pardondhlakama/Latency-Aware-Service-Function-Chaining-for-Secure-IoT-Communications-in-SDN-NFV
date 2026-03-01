@@ -1,0 +1,146 @@
+"""
+Network Topology Generator for 5G Edge-Cloud Infrastructure
+Creates hierarchical graph with IoT, edge, and cloud layers.
+"""
+
+import networkx as nx
+import numpy as np
+from typing import Dict, List, Tuple
+
+def generate_network(
+    edge_nodes: int = 100,
+    cloud_nodes: int = 5,
+    link_params: Dict = None,
+    seed: int = None
+) -> nx.Graph:
+    """
+    Generate a hierarchical 5G edge-cloud network topology.
+    
+    Architecture:
+      IoT Layer: Virtual endpoints (not modeled as graph nodes)
+      Edge Layer: Distributed micro-data centers (low latency, limited resources)
+      Cloud Layer: Centralized data centers (high capacity, higher latency)
+    
+    Args:
+        edge_nodes: Number of edge nodes to generate
+        cloud_nodes: Number of cloud data centers
+        link_params: Dictionary with latency/bandwidth distributions
+        seed: Random seed for reproducibility
+        
+    Returns:
+        NetworkX graph with node/edge attributes
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # Default link parameters if not provided
+    if link_params is None:
+        link_params = {
+            'edge_edge': [1, 5],      # ms latency range
+            'edge_cloud': [10, 30],   # ms latency range
+            'cloud_cloud': [5, 15],   # ms latency range
+            'bandwidth': [1, 10]      # Gbps range
+        }
+    
+    G = nx.Graph()
+    
+    # ========== Create Edge Nodes ==========
+    edge_node_ids = [f"edge_{i}" for i in range(edge_nodes)]
+    for node_id in edge_node_ids:
+        G.add_node(node_id, 
+                  type='edge',
+                  cpu_capacity=np.random.randint(10, 50),    # cores
+                  memory_capacity=np.random.randint(16, 64), # GB
+                  compute_speed=np.random.uniform(0.8, 1.2), # relative speed factor
+                  region=np.random.randint(0, 10))           # geographic region (0-9)
+    
+    # ========== Create Cloud Nodes ==========
+    cloud_node_ids = [f"cloud_{i}" for i in range(cloud_nodes)]
+    for node_id in cloud_node_ids:
+        G.add_node(node_id,
+                  type='cloud',
+                  cpu_capacity=np.random.randint(100, 500),   # cores
+                  memory_capacity=np.random.randint(128, 512), # GB
+                  compute_speed=np.random.uniform(1.0, 1.5),   # faster than edge
+                  region=np.random.randint(0, 3))              # fewer regions for cloud
+    
+    # ========== Create Edge-Edge Links (within same region) ==========
+    for i, node1 in enumerate(edge_node_ids):
+        region1 = G.nodes[node1]['region']
+        # Connect to 2-4 other edge nodes in same region
+        candidates = [n for n in edge_node_ids 
+                     if G.nodes[n]['region'] == region1 and n != node1]
+        num_links = np.random.randint(2, min(5, len(candidates) + 1))
+        connected = np.random.choice(candidates, size=num_links, replace=False)
+        
+        for node2 in connected:
+            if not G.has_edge(node1, node2):
+                latency = np.random.uniform(*link_params['edge_edge'])
+                bandwidth = np.random.uniform(*link_params['bandwidth'])
+                security = np.random.choice(['none', 'basic', 'advanced'], 
+                                          p=[0.2, 0.5, 0.3])
+                G.add_edge(node1, node2,
+                          latency=latency,
+                          bandwidth=bandwidth,
+                          security_level=security,
+                          link_type='edge-edge')
+    
+    # ========== Create Edge-Cloud Links (each edge connects to 1-2 clouds) ==========
+    for edge_node in edge_node_ids:
+        edge_region = G.nodes[edge_node]['region']
+        # Prefer clouds in same or nearby regions
+        cloud_scores = [
+            2.0 if G.nodes[c]['region'] == edge_region else
+            1.0 if abs(G.nodes[c]['region'] - edge_region) <= 1 else
+            0.5
+            for c in cloud_node_ids
+        ]
+        cloud_probs = np.array(cloud_scores) / sum(cloud_scores)
+        num_clouds = np.random.randint(1, 3)
+        connected_clouds = np.random.choice(
+            cloud_node_ids, size=num_clouds, replace=False, p=cloud_probs
+        )
+        
+        for cloud_node in connected_clouds:
+            latency = np.random.uniform(*link_params['edge_cloud'])
+            bandwidth = np.random.uniform(*link_params['bandwidth']) * 2  # Higher capacity
+            security = np.random.choice(['basic', 'advanced'], p=[0.3, 0.7])  # More secure
+            G.add_edge(edge_node, cloud_node,
+                      latency=latency,
+                      bandwidth=bandwidth,
+                      security_level=security,
+                      link_type='edge-cloud')
+    
+    # ========== Create Cloud-Cloud Links (fully connected backbone) ==========
+    for i, cloud1 in enumerate(cloud_node_ids):
+        for cloud2 in cloud_node_ids[i+1:]:
+            latency = np.random.uniform(*link_params['cloud_cloud'])
+            bandwidth = np.random.uniform(*link_params['bandwidth']) * 5  # Backbone capacity
+            security = 'advanced'  # Cloud backbone always secure
+            G.add_edge(cloud1, cloud2,
+                      latency=latency,
+                      bandwidth=bandwidth,
+                      security_level=security,
+                      link_type='cloud-cloud')
+    
+    # ========== Add IoT Device Attachment Points (virtual) ==========
+    # IoT devices are not graph nodes but attach to edge nodes
+    # Store attachment info as node attribute for simulation
+    for edge_node in edge_node_ids:
+        num_iot = np.random.randint(5, 20)  # IoT devices per edge node
+        G.nodes[edge_node]['iot_devices'] = [
+            f"iot_{edge_node}_{i}" for i in range(num_iot)
+        ]
+    
+    return G
+
+
+def get_node_type(G: nx.Graph, node_id: str) -> str:
+    """Helper: Get node type ('edge' or 'cloud')."""
+    return G.nodes[node_id].get('type', 'unknown')
+
+
+def get_path_latency(G: nx.Graph, path: List[str]) -> float:
+    """Helper: Compute total propagation latency for a path."""
+    return sum(G.edges[path[i], path[i+1]]['latency'] 
+              for i in range(len(path) - 1))

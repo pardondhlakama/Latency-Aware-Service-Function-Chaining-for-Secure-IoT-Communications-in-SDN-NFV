@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+Latency-Aware SFC Orchestration Simulator
+Main entry point for reproducing manuscript results.
+
+Usage:
+    python simulator/main.py --config config/default.yaml --runs 30
+"""
+
+import argparse
+import yaml
+import numpy as np
+import json
+from pathlib import Path
+from datetime import datetime
+from tqdm import tqdm
+
+from simulator.topology import generate_network
+from simulator.orchestrator import LatencyAwareOrchestrator
+from simulator.baselines import LatencyAgnostic, SecurityFirst, MILPExact
+from simulator.metrics import compute_metrics, save_results, print_summary
+
+def load_config(config_path):
+    """Load YAML configuration file."""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+def generate_sfc_request(traffic_config, req_id):
+    """Generate a synthetic SFC request based on traffic configuration."""
+    # Randomly select chain length
+    chain_length = np.random.choice(traffic_config['chain_lengths'])
+    
+    # Generate VNF chain (simplified model)
+    vnf_types = ['firewall', 'ids', 'encryptor', 'transcoder', 'loadbalancer']
+    chain = []
+    for i in range(chain_length):
+        vnf = {
+            'id': f"vnf_{req_id}_{i}",
+            'type': np.random.choice(vnf_types),
+            'cpu_requirement': np.random.randint(1, 5),  # cores
+            'processing_time': np.random.uniform(0.5, 2.0)  # ms
+        }
+        # Mark security VNFs
+        if vnf['type'] in ['firewall', 'ids', 'encryptor']:
+            vnf['is_security'] = True
+        else:
+            vnf['is_security'] = False
+        chain.append(vnf)
+    
+    # Select latency bound based on application class
+    latency_bound = np.random.choice(traffic_config['latency_bounds'])
+    
+    # Select security policy
+    policy_weights = list(traffic_config['security_policies'].values())
+    policy_choices = list(traffic_config['security_policies'].keys())
+    security_policy = np.random.choice(policy_choices, p=policy_weights)
+    
+    return {
+        'id': req_id,
+        'source': f"iot_{np.random.randint(0, 10)}",
+        'destination': f"cloud_{np.random.randint(0, 5)}",
+        'chain': chain,
+        'max_latency': latency_bound,
+        'security_policy': security_policy,
+        'throughput_mbps': np.random.uniform(0.1, 10.0)
+    }
+
+def run_experiment(config, algorithm='proposed', seed=None):
+    """Run single experiment with specified algorithm."""
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # Generate network topology
+    network = generate_network(
+        edge_nodes=config['network']['edge_nodes'],
+        cloud_nodes=config['network']['cloud_nodes'],
+        link_params={
+            'edge_edge': config['network']['link_latency_edge'],
+            'edge_cloud': config['network']['link_latency_cloud'],
+            'cloud_cloud': [5, 15],
+            'bandwidth': config['network']['bandwidth_gbps']
+        }
+    )
+    
+    # Initialize orchestrator based on algorithm choice
+    if algorithm == 'proposed':
+        orchestrator = LatencyAwareOrchestrator(
+            network, 
+            alpha=config['algorithm']['alpha'],
+            beta=config['algorithm']['beta']
+        )
+    elif algorithm == 'latency_agnostic':
+        orchestrator = LatencyAgnostic(network)
+    elif algorithm == 'security_first':
+        orchestrator = SecurityFirst(network)
+    elif algorithm == 'milp_exact':
+        orchestrator = MILPExact(network, time_limit=300)  # 5 min timeout
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
+    
+    # Process SFC requests
+    results = []
+    num_requests = config['evaluation']['num_requests']
+    
+    for req_id in tqdm(range(num_requests), desc=f"{algorithm} processing"):
+        request = generate_sfc_request(config['traffic'], req_id)
+        try:
+            result = orchestrator.process_request(request)
+            results.append(result)
+        except Exception as e:
+            # Log failed requests but continue
+            results.append({
+                'request_id': req_id,
+                'error': str(e),
+                'accepted': False,
+                'latency_ms': float('inf'),
+                'compliant': False
+            })
+    
+    return compute_metrics(results, network, config)
+
+def aggregate_results(all_runs):
+    """Aggregate results from multiple independent runs."""
+    aggregated = {}
+    
+    # Average numeric metrics across runs
+    for key in all_runs[0].keys():
+        if key not in ['config', 'timestamp']:
+            values = [run[key] for run in all_runs if key in run]
+            if values and isinstance(values[0], (int, float)):
+                aggregated[f'{key}_mean'] = np.mean(values)
+                aggregated[f'{key}_std'] = np.std(values)
+                aggregated[f'{key}_95ci'] = 1.96 * np.std(values) / np.sqrt(len(values))
+    
+    # Keep config and metadata from first run
+    aggregated['config'] = all_runs[0].get('config', {})
+    aggregated['timestamp'] = datetime.now().isoformat()
+    aggregated['num_runs'] = len(all_runs)
+    
+    return aggregated
+
+def main():
+    parser = argparse.ArgumentParser(description='SFC Orchestration Simulator')
+    parser.add_argument('--config', type=str, default='config/default.yaml',
+                       help='Path to configuration YAML file')
+    parser.add_argument('--algorithm', type=str, default='proposed',
+                       choices=['proposed', 'latency_agnostic', 'security_first', 'milp_exact'],
+                       help='Algorithm to evaluate')
+    parser.add_argument('--runs', type=int, default=1,
+                       help='Number of independent runs for statistical robustness')
+    parser.add_argument('--output', type=str, default='results/raw/',
+                       help='Output directory for results')
+    parser.add_argument('--seed', type=int, default=None,
+                       help='Random seed for reproducibility')
+    
+    args = parser.parse_args()
+    config = load_config(args.config)
+    
+    # Ensure output directory exists
+    Path(args.output).mkdir(parents=True, exist_ok=True)
+    
+    print(f"🚀 Starting simulation: {args.algorithm} algorithm")
+    print(f"📊 Configuration: {args.config}")
+    print(f"🔄 Independent runs: {args.runs}")
+    
+    # Run experiments
+    all_results = []
+    for run in range(args.runs):
+        seed = args.seed if args.seed is not None else run
+        print(f"\n▶️  Running experiment {run+1}/{args.runs} (seed={seed})...")
+        metrics = run_experiment(config, args.algorithm, seed=seed)
+        all_results.append(metrics)
+    
+    # Aggregate and save results
+    if args.runs > 1:
+        aggregated = aggregate_results(all_results)
+        output_file = Path(args.output) / f"{args.algorithm}_aggregated.json"
+    else:
+        aggregated = all_results[0]
+        output_file = Path(args.output) / f"{args.algorithm}_results.json"
+    
+    with open(output_file, 'w') as f:
+        json.dump(aggregated, f, indent=2, default=str)
+    
+    print(f"\n✅ Results saved to {output_file}")
+    
+    # Print summary to console
+    print_summary(aggregated)
+    
+    # Save configuration used for reproducibility
+    config_output = Path(args.output) / "config_used.yaml"
+    with open(config_output, 'w') as f:
+        yaml.dump(config, f)
+    print(f"📋 Configuration saved to {config_output}")
+
+if __name__ == "__main__":
+    main()
