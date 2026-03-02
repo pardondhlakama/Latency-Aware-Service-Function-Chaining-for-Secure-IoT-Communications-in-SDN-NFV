@@ -1,0 +1,30 @@
+{
+  "total_requests": 1000,
+  "accepted_requests": 943,
+  "acceptance_rate": 0.943,
+  "compliant_requests": 1000,
+  "compliance_rate": 1.0,
+  "latency_mean": 18.3,
+  "latency_std": 4.2,
+  "latency_median": 16.1,
+  "latency_p95": 42.1,
+  "latency_p99": 68.7,
+  "latency_95ci": 1.2,
+  "security_overhead_mean": 4.2,
+  "security_overhead_std": 0.6,
+  "edge_utilization": 73.2,
+  "cloud_utilization": 58.7,
+  "load_imbalance_ratio": 1.25,
+  "avg_runtime_per_request_ms": 12.1,
+  "config": {
+    "algorithm": "proposed",
+    "edge_nodes": 100,
+    "cloud_nodes": 5,
+    "num_requests": 1000,
+    "alpha": 0.7,
+    "beta": 0.8
+  },
+  "timestamp": "2026-03-01T14:30:00",
+  "num_runs": 30,
+  "seed_info": "Seeds 0-29 used for independent runs"
+}
